@@ -309,7 +309,7 @@ describe('detectBip39Sequences', () => {
     expect(result).toEqual([])
   })
 
-  it('cross-line detection stops at empty lines', () => {
+  it('cross-line detection treats blank lines as transparent', () => {
     const content = [
       'abandon',
       'ability',
@@ -319,7 +319,38 @@ describe('detectBip39Sequences', () => {
       'above',
     ].join('\n')
     const result = detectBip39Sequences(content)
-    expect(result).toEqual([])
+    expect(result).toHaveLength(1)
+    expect(result[0].matchedWords).toHaveLength(5)
+  })
+
+  it('detects 12-word seed phrase formatted as 4-word blocks with blank spacers', () => {
+    const content = [
+      'abandon ability able about',
+      '',
+      'above absent absorb abstract',
+      '',
+      'absurd abuse access accident',
+    ].join('\n')
+    const result = detectBip39Sequences(content)
+    expect(result).toHaveLength(1)
+    expect(result[0].matchedWords).toHaveLength(12)
+  })
+
+  it('cross-line detection treats whitespace-only lines as transparent', () => {
+    const content = [
+      'abandon',
+      '   ',
+      'ability',
+      '\t',
+      'able',
+      '  \t  ',
+      'about',
+      '    ',
+      'above',
+    ].join('\n')
+    const result = detectBip39Sequences(content)
+    expect(result).toHaveLength(1)
+    expect(result[0].matchedWords).toHaveLength(5)
   })
 
   it('does NOT cross-line flag lines with mixed BIP39 and non-BIP39 words', () => {

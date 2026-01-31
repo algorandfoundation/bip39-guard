@@ -161,6 +161,9 @@ export function detectBip39Sequences(
       continue
     }
 
+    // Blank/whitespace-only lines are transparent — skip without flushing
+    if (lines[i].trim().length === 0) continue
+
     const { bip39Words, isBip39Pure } = analyzeLine(lines[i])
 
     if (isBip39Pure && bip39Words.length > 0) {
