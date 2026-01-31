@@ -95,14 +95,15 @@ PORT=3000`
     expect(result[0].matchedWords).toHaveLength(12)
   })
 
-  it('does NOT flag .env with quoted mnemonic (quotes break token matching)', () => {
-    // Quoted format: each token includes the quote characters
+  it('detects .env with quoted mnemonic including last word', () => {
     const envContent = `MNEMONIC="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"`
     const result = detectBip39Sequences(envContent)
-    // First token is "MNEMONIC="abandon" and last is "about"" — both have punctuation
-    // The 10 middle tokens (abandon x9 + abandon) are clean and form a sequence
     expect(result).toHaveLength(1)
-    expect(result[0].matchedWords).toHaveLength(10)
+    // MNEMONIC="abandon is one token — M is alpha on left, n is alpha on right,
+    // so no stripping occurs. Interior =" means no match.
+    // The 10 middle tokens are clean. about" → strip trailing " → about matches.
+    // Total: 10 middle + 1 last = 11
+    expect(result[0].matchedWords).toHaveLength(11)
   })
 
   it('detects seed phrase in a TypeScript comment', () => {
@@ -120,14 +121,16 @@ wallet.connect()`
     expect(result[0].matchedWords).toHaveLength(9)
   })
 
-  it('does NOT flag JSON array format (quotes around each word)', () => {
+  it('detects JSON array with BIP39 words after stripping punctuation', () => {
     const jsonContent = `{
   "name": "my-project",
   "mnemonic": ["abandon", "ability", "able", "about", "above", "absent"],
   "version": "1.0.0"
 }`
-    // Every word is wrapped in quotes like "abandon", — not a clean token
-    expect(detectBip39Sequences(jsonContent)).toEqual([])
+    const result = detectBip39Sequences(jsonContent)
+    expect(result).toHaveLength(1)
+    expect(result[0].lineNumber).toBe(3)
+    expect(result[0].matchedWords).toHaveLength(6)
   })
 
   it('returns no violations for clean Python file', () => {

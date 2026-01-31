@@ -39,19 +39,42 @@ describe('detectBip39Sequences', () => {
     expect(result[0].matchedWords).toEqual(['abandon', 'ability', 'able', 'about', 'above'])
   })
 
-  it('does NOT flag words with attached punctuation', () => {
-    // Quoted words, commas, brackets — not a valid mnemonic format
-    expect(detectBip39Sequences('"abandon", "ability", "able", "about", "above"')).toEqual([])
+  it('detects comma-separated BIP39 words', () => {
+    const result = detectBip39Sequences(
+      'abandon, ability, able, about, above'
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].matchedWords).toEqual([
+      'abandon',
+      'ability',
+      'able',
+      'about',
+      'above',
+    ])
   })
 
-  it('does NOT flag words joined by punctuation', () => {
-    // Semicolons, hyphens, etc. break the mnemonic format
+  it('detects quoted comma-separated BIP39 words', () => {
+    const result = detectBip39Sequences(
+      '"abandon", "ability", "able", "about", "above"'
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].matchedWords).toEqual([
+      'abandon',
+      'ability',
+      'able',
+      'about',
+      'above',
+    ])
+  })
+
+  it('does NOT flag words joined without spaces', () => {
+    // Semicolons, hyphens joining into a single token — not a mnemonic
     expect(detectBip39Sequences('abandon;ability;able;about;above')).toEqual([])
     expect(detectBip39Sequences('abandon-ability-able-about-above')).toEqual([])
   })
 
-  it('does NOT flag words with apostrophes or possessives', () => {
-    // "they're", "team)" etc. should not match
+  it('does NOT flag prose with interior punctuation', () => {
+    // "they're" has interior apostrophe, "open-source" has interior hyphen
     expect(
       detectBip39Sequences("team) indicate genuine open-source health. They're")
     ).toEqual([])
@@ -69,11 +92,18 @@ describe('detectBip39Sequences', () => {
     expect(result[0].lineNumber).toBe(3)
   })
 
-  it('does NOT flag code array syntax (words wrapped in quotes)', () => {
-    // ["abandon", "ability"] — quotes make each token non-alphabetic
-    expect(
-      detectBip39Sequences('["abandon", "ability", "able", "about", "above"]')
-    ).toEqual([])
+  it('detects JSON array syntax with BIP39 words', () => {
+    const result = detectBip39Sequences(
+      '["abandon", "ability", "able", "about", "above"]'
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].matchedWords).toEqual([
+      'abandon',
+      'ability',
+      'able',
+      'about',
+      'above',
+    ])
   })
 
   it('respects custom threshold parameter', () => {
@@ -116,5 +146,75 @@ describe('detectBip39Sequences', () => {
     expect(result).toHaveLength(2)
     expect(result[0].lineNumber).toBe(1)
     expect(result[1].lineNumber).toBe(3)
+  })
+
+  it('detects numbered list of BIP39 words on a single line', () => {
+    const result = detectBip39Sequences(
+      '1. abandon 2. ability 3. able 4. about 5. above'
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].matchedWords).toEqual([
+      'abandon',
+      'ability',
+      'able',
+      'about',
+      'above',
+    ])
+  })
+
+  it('detects parenthesized numbered list of BIP39 words', () => {
+    const result = detectBip39Sequences(
+      '1) abandon 2) ability 3) able 4) about 5) above'
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].matchedWords).toEqual([
+      'abandon',
+      'ability',
+      'able',
+      'about',
+      'above',
+    ])
+  })
+
+  it('detects single-quoted BIP39 words', () => {
+    const result = detectBip39Sequences(
+      "'abandon' 'ability' 'able' 'about' 'above'"
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].matchedWords).toHaveLength(5)
+  })
+
+  it('detects backtick-quoted BIP39 words', () => {
+    const result = detectBip39Sequences(
+      '`abandon` `ability` `able` `about` `above`'
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].matchedWords).toHaveLength(5)
+  })
+
+  it('does NOT flag words with interior punctuation after stripping', () => {
+    // "can't" → strip quotes → "can't" still has interior apostrophe
+    // "re-enter" → strip → "re-enter" still has interior hyphen
+    expect(
+      detectBip39Sequences("can't won't they're you're we're")
+    ).toEqual([])
+  })
+
+  it('does NOT flag numbered non-BIP39 words', () => {
+    expect(
+      detectBip39Sequences('1. hello 2. world 3. testing 4. something 5. random')
+    ).toEqual([])
+  })
+
+  it('detects env var with double-quoted mnemonic (last word recovered)', () => {
+    const result = detectBip39Sequences(
+      'MNEMONIC="abandon ability able about above absent absorb abstract"'
+    )
+    expect(result).toHaveLength(1)
+    // MNEMONIC="abandon is one token with interior = and " → no match.
+    // ability through absorb = 6 clean matches.
+    // abstract" → strip trailing " → abstract → match. Total: 7.
+    expect(result[0].matchedWords).toHaveLength(7)
+    expect(result[0].matchedWords[6]).toBe('abstract')
   })
 })
