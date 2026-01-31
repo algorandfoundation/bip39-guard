@@ -30,6 +30,15 @@ function stripToken(token: string): string | null | 'skip' {
 }
 
 /**
+ * Annotation tokens commonly used to label seed phrase words.
+ * Treated as transparent (SKIP) in both single-line and cross-line detection.
+ */
+const ANNOTATION_TOKENS = new Set([
+  'word', 'words', 'mnemonic', 'seed', 'phrase',
+  'key', 'backup', 'recovery', 'secret', 'passphrase',
+])
+
+/**
  * Analyze a single line's tokens and return the BIP39 words found,
  * along with whether the line is "BIP39-pure" (every non-skip token is BIP39).
  */
@@ -55,6 +64,9 @@ function analyzeLine(line: string): {
 
     if (stripped === 'skip') continue // numbering, punctuation — ignore
 
+    // Annotation tokens (word, mnemonic, seed, etc.) — treat as transparent
+    if (stripped !== null && ANNOTATION_TOKENS.has(stripped)) continue
+
     hasAnyWord = true
     if (stripped !== null && BIP39_WORDS.has(stripped)) {
       bip39Words.push(stripped)
@@ -76,7 +88,8 @@ function analyzeLine(line: string): {
  * Detection operates in two modes:
  * 1. **Single-line**: finds sequences of BIP39 words within a line (handles mixed content).
  * 2. **Cross-line**: accumulates words across consecutive "BIP39-pure" lines (where every
- *    non-skip token is a BIP39 word). Catches one-per-line, numbered lists, and grid formats.
+ *    non-skip token is a BIP39 word). Blank or whitespace-only lines are transparent and do
+ *    not break the sequence. Catches one-per-line, numbered lists, formatted blocks, and grids.
  *
  * Tokens are stripped of surrounding punctuation (quotes, commas, brackets, etc.)
  * before matching. Interior punctuation (hyphens, apostrophes) still disqualifies a token.
@@ -109,6 +122,9 @@ export function detectBip39Sequences(
       const stripped = stripToken(tokens[j])
 
       if (stripped === 'skip') continue
+
+      // Annotation tokens — transparent, don't break or contribute to sequence
+      if (stripped !== null && ANNOTATION_TOKENS.has(stripped)) continue
 
       if (stripped !== null && BIP39_WORDS.has(stripped)) {
         consecutive++
@@ -160,6 +176,9 @@ export function detectBip39Sequences(
       flushCrossLine()
       continue
     }
+
+    // Blank/whitespace-only lines are transparent — skip without flushing
+    if (lines[i].trim().length === 0) continue
 
     const { bip39Words, isBip39Pure } = analyzeLine(lines[i])
 

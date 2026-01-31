@@ -1,12 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BIP39 Seed Phrase Pre-Commit Guard
-# Detects sequences of 5+ consecutive BIP39 mnemonic words in staged files.
-# Usage: Add to .husky/pre-commit or run manually before committing.
+# BIP39 Seed Phrase Repository Scanner
+# Scans all files in a repository for sequences of 5+ consecutive BIP39 mnemonic words.
+# Usage: bash/scan-repo.sh [--git | --dir <path>] [--include-lockfiles] [--threshold <n>]
 # Portable: Bash 3.2+ (macOS default) and git. No other dependencies.
 
-THRESHOLD=${BIP39_THRESHOLD:-5}
+THRESHOLD=5
+MODE="git"
+DIR_PATH="."
+INCLUDE_LOCKFILES=0
+
+# Parse CLI flags
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --git)
+      MODE="git"
+      shift
+      ;;
+    --dir)
+      [[ $# -ge 2 ]] || { echo "Error: --dir requires a path argument" >&2; exit 2; }
+      MODE="dir"
+      DIR_PATH="$2"
+      shift 2
+      ;;
+    --include-lockfiles)
+      INCLUDE_LOCKFILES=1
+      shift
+      ;;
+    --threshold)
+      [[ $# -ge 2 ]] || { echo "Error: --threshold requires a number" >&2; exit 2; }
+      THRESHOLD="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      echo "Usage: $0 [--git | --dir <path>] [--include-lockfiles] [--threshold <n>]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 # Write the wordlist to a temp file for grep-based lookup (Bash 3.2 compatible)
 BIP39_FILE=$(mktemp)
@@ -95,7 +128,7 @@ print_header() {
   if [[ $header_printed -eq 0 ]]; then
     echo "" >&2
     echo -e "${RED}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}" >&2
-    echo -e "${RED}${BOLD}║  BIP39 SEED PHRASE DETECTED — COMMIT BLOCKED                ║${NC}" >&2
+    echo -e "${RED}${BOLD}║  BIP39 SEED PHRASE DETECTED                                 ║${NC}" >&2
     echo -e "${RED}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}" >&2
     header_printed=1
   fi
@@ -111,79 +144,90 @@ report_violation() {
   echo -e "  ${RED}  → ${words}${NC}" >&2
 }
 
-# Get staged files (excluding deleted)
-staged_files=$(git diff --cached --name-only --diff-filter=d 2>/dev/null || true)
+# Enumerate files based on mode
+enumerate_files() {
+  if [[ "$MODE" = "git" ]]; then
+    git ls-files 2>/dev/null || true
+  else
+    find "$DIR_PATH" -type f \
+      ! -path '*/.git/*' \
+      ! -path '*/node_modules/*' \
+      2>/dev/null || true
+  fi
+}
 
-if [[ -z "$staged_files" ]]; then
-  echo -e "${GREEN}✓ No BIP39 seed phrases detected in staged files${NC}" >&2
-  exit 0
-fi
+# Check if a file is binary (contains null bytes)
+is_binary_file() {
+  local file="$1"
+  # Use tr to detect null bytes — portable across macOS and GNU systems
+  # (grep -P is not available on macOS default grep)
+  if tr -d '\0' < "$file" | cmp -s - "$file"; then
+    return 1  # no null bytes removed — text file
+  fi
+  return 0  # null bytes found — binary file
+}
 
-while IFS= read -r file; do
-  [[ -z "$file" ]] && continue
-
-  # Skip lock files
-  basename_file="${file##*/}"
-  skip=false
-  for lockfile in $LOCK_FILES; do
-    if [[ "$basename_file" = "$lockfile" ]]; then
-      skip=true
-      break
-    fi
-  done
-  $skip && continue
-
-  # Get the diff for this file
-  diff_output=$(git diff --cached -- "$file" 2>/dev/null || true)
-  [[ -z "$diff_output" ]] && continue
-
+# Scan a single file for BIP39 seed phrases
+scan_file() {
+  local file="$1"
   current_file="$file"
-  current_line=0
+  local current_line=0
 
   # Cross-line state
   cross_words=""
   cross_count=0
   cross_start_line=0
 
-  while IFS= read -r line; do
-    # Parse diff hunk headers for line numbers
-    if [[ "$line" =~ ^@@\ -[0-9]+(,[0-9]+)?\ \+([0-9]+)(,[0-9]+)?\ @@ ]]; then
-      current_line=${BASH_REMATCH[2]}
-      flush_cross_line
-      continue
-    fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    current_line=$((current_line + 1))
 
-    # Skip diff file headers
-    if [[ "$line" = "+++"* ]] || [[ "$line" = "---"* ]]; then
-      continue
-    fi
+    # Lowercase the content, split on whitespace
+    local lower_content
+    lower_content=$(echo "$line" | tr '[:upper:]' '[:lower:]')
 
-    if [[ "$line" = "+"* ]]; then
-      # Added line — remove the leading '+'
-      content="${line##+}"
+    local consecutive=0
+    local matched_words=""
+    local line_reported=0
+    local line_bip39_count=0
+    local line_has_non_bip39_word=0
+    local line_has_any_word=0
 
-      # Lowercase the content, split on whitespace
-      lower_content=$(echo "$content" | tr '[:upper:]' '[:lower:]')
+    for token in $lower_content; do
+      [[ -z "$token" ]] && continue
 
-      consecutive=0
-      matched_words=""
-      line_reported=0
-      line_bip39_count=0
-      line_has_non_bip39_word=0
-      line_has_any_word=0
+      strip_token "$token"
 
-      for token in $lower_content; do
-        [[ -z "$token" ]] && continue
-
-        strip_token "$token"
-
-        case "$STRIP_RESULT" in
-          SKIP)
-            # Purely non-alpha (e.g. "1.", "//") — skip without breaking sequence
+      case "$STRIP_RESULT" in
+        SKIP)
+          # Purely non-alpha (e.g. "1.", "//") — skip without breaking sequence
+          continue
+          ;;
+        BREAK)
+          # Interior punctuation (e.g. "they're", "open-source") — flush sequence
+          if [[ $consecutive -ge $THRESHOLD ]]; then
+            report_violation "$file" "$current_line" "$consecutive" "$matched_words"
+            line_reported=1
+          fi
+          consecutive=0
+          matched_words=""
+          line_has_non_bip39_word=1
+          line_has_any_word=1
+          ;;
+        *)
+          # Check annotation tokens before BIP39
+          if is_annotation_token "$STRIP_RESULT"; then
             continue
-            ;;
-          BREAK)
-            # Interior punctuation (e.g. "they're", "open-source") — flush sequence
+          fi
+          line_has_any_word=1
+          if is_bip39 "$STRIP_RESULT"; then
+            consecutive=$((consecutive + 1))
+            line_bip39_count=$((line_bip39_count + 1))
+            if [[ -z "$matched_words" ]]; then
+              matched_words="$STRIP_RESULT"
+            else
+              matched_words="$matched_words $STRIP_RESULT"
+            fi
+          else
             if [[ $consecutive -ge $THRESHOLD ]]; then
               report_violation "$file" "$current_line" "$consecutive" "$matched_words"
               line_reported=1
@@ -191,105 +235,101 @@ while IFS= read -r file; do
             consecutive=0
             matched_words=""
             line_has_non_bip39_word=1
-            line_has_any_word=1
-            ;;
-          *)
-            # Check annotation tokens before BIP39
-            if is_annotation_token "$STRIP_RESULT"; then
-              continue
-            fi
-            line_has_any_word=1
-            if is_bip39 "$STRIP_RESULT"; then
-              consecutive=$((consecutive + 1))
-              line_bip39_count=$((line_bip39_count + 1))
-              if [[ -z "$matched_words" ]]; then
-                matched_words="$STRIP_RESULT"
-              else
-                matched_words="$matched_words $STRIP_RESULT"
-              fi
-            else
-              if [[ $consecutive -ge $THRESHOLD ]]; then
-                report_violation "$file" "$current_line" "$consecutive" "$matched_words"
-                line_reported=1
-              fi
-              consecutive=0
-              matched_words=""
-              line_has_non_bip39_word=1
-            fi
-            ;;
-        esac
-      done
+          fi
+          ;;
+      esac
+    done
 
-      # Check trailing sequence at end of line
-      if [[ $consecutive -ge $THRESHOLD ]]; then
-        report_violation "$file" "$current_line" "$consecutive" "$matched_words"
-        line_reported=1
+    # Check trailing sequence at end of line
+    if [[ $consecutive -ge $THRESHOLD ]]; then
+      report_violation "$file" "$current_line" "$consecutive" "$matched_words"
+      line_reported=1
+    fi
+
+    # Cross-line accumulation
+    # Blank/whitespace-only lines and annotation-only lines are transparent
+    local trimmed_content
+    trimmed_content=$(echo "$line" | tr -d '[:space:]')
+    if [[ -z "$trimmed_content" ]]; then
+      : # blank line — transparent
+    elif [[ $line_has_any_word -eq 0 && $line_bip39_count -eq 0 ]]; then
+      : # annotation/skip-only line — transparent
+    elif [[ $line_reported -eq 1 ]]; then
+      # Already reported by single-line — flush cross-line
+      flush_cross_line
+    elif [[ $line_has_any_word -eq 1 && $line_has_non_bip39_word -eq 0 && $line_bip39_count -gt 0 ]]; then
+      # BIP39-pure line — accumulate for cross-line detection
+      if [[ $cross_count -eq 0 ]]; then
+        cross_start_line=$current_line
       fi
-
-      # Cross-line accumulation
-      # Blank/whitespace-only lines and annotation-only lines are transparent
-      trimmed_content=$(echo "$content" | tr -d '[:space:]')
-      if [[ -z "$trimmed_content" ]]; then
-        : # blank line — transparent
-      elif [[ $line_has_any_word -eq 0 && $line_bip39_count -eq 0 ]]; then
-        : # annotation/skip-only line — transparent
-      elif [[ $line_reported -eq 1 ]]; then
-        # Already reported by single-line — flush cross-line
-        flush_cross_line
-      elif [[ $line_has_any_word -eq 1 && $line_has_non_bip39_word -eq 0 && $line_bip39_count -gt 0 ]]; then
-        # BIP39-pure line — accumulate for cross-line detection
-        if [[ $cross_count -eq 0 ]]; then
-          cross_start_line=$current_line
+      # Gather all BIP39 words from this line
+      for token in $lower_content; do
+        [[ -z "$token" ]] && continue
+        strip_token "$token"
+        [[ "$STRIP_RESULT" = "SKIP" || "$STRIP_RESULT" = "BREAK" ]] && continue
+        if is_annotation_token "$STRIP_RESULT"; then
+          continue
         fi
-        # Gather all BIP39 words from this line (rebuild from matched state)
-        # We need to re-extract because matched_words only has the trailing run
-        # Re-scan for all BIP39 words on this line
-        for token in $lower_content; do
-          [[ -z "$token" ]] && continue
-          strip_token "$token"
-          [[ "$STRIP_RESULT" = "SKIP" || "$STRIP_RESULT" = "BREAK" ]] && continue
-          if is_annotation_token "$STRIP_RESULT"; then
-            continue
+        if is_bip39 "$STRIP_RESULT"; then
+          if [[ -z "$cross_words" ]]; then
+            cross_words="$STRIP_RESULT"
+          else
+            cross_words="$cross_words $STRIP_RESULT"
           fi
-          if is_bip39 "$STRIP_RESULT"; then
-            if [[ -z "$cross_words" ]]; then
-              cross_words="$STRIP_RESULT"
-            else
-              cross_words="$cross_words $STRIP_RESULT"
-            fi
-            cross_count=$((cross_count + 1))
-          fi
-        done
-      else
-        # Non-BIP39-pure line — flush cross-line
-        flush_cross_line
-      fi
-
-      current_line=$((current_line + 1))
-    elif [[ "$line" != "-"* ]]; then
-      # Context line (no +/- prefix) — flush cross-line, advance line counter
-      flush_cross_line
-      current_line=$((current_line + 1))
-    fi
-    # Removed lines ("-" prefix) — implicitly flush cross-line
-    # (they don't enter either branch above, so no flush needed since
-    #  they don't contribute added content, but we should flush)
-    if [[ "$line" = "-"* ]] && [[ "$line" != "---"* ]]; then
+          cross_count=$((cross_count + 1))
+        fi
+      done
+    else
+      # Non-BIP39-pure line — flush cross-line
       flush_cross_line
     fi
-  done <<< "$diff_output"
+  done < "$file"
 
   # Flush remaining cross-line accumulation at end of file
   flush_cross_line
-done <<< "$staged_files"
+}
+
+# Main
+file_list=$(enumerate_files)
+
+if [[ -z "$file_list" ]]; then
+  echo -e "${GREEN}✓ No BIP39 seed phrases detected${NC}" >&2
+  exit 0
+fi
+
+while IFS= read -r file; do
+  [[ -z "$file" ]] && continue
+
+  # Skip lock files unless --include-lockfiles
+  if [[ $INCLUDE_LOCKFILES -eq 0 ]]; then
+    basename_file="${file##*/}"
+    skip=false
+    for lockfile in $LOCK_FILES; do
+      if [[ "$basename_file" = "$lockfile" ]]; then
+        skip=true
+        break
+      fi
+    done
+    $skip && continue
+  fi
+
+  # Skip files that don't exist (e.g. deleted but still in git index)
+  [[ -f "$file" ]] || continue
+
+  # Skip binary files
+  if is_binary_file "$file"; then
+    continue
+  fi
+
+  scan_file "$file"
+done <<< "$file_list"
 
 if [[ $found_violations -gt 0 ]]; then
   echo "" >&2
-  echo -e "${RED}${BOLD}Commit blocked.${NC} ${RED}Remove seed phrases before committing.${NC}" >&2
-  echo -e "${RED}Use ${BOLD}git commit --no-verify${NC} ${RED}to bypass (not recommended).${NC}" >&2
+  echo -e "${RED}${BOLD}Found ${found_violations} violation(s).${NC} ${RED}Remove seed phrases from the repository.${NC}" >&2
   echo "" >&2
   exit 1
 else
-  echo -e "${GREEN}✓ No BIP39 seed phrases detected in staged files${NC}" >&2
+  echo -e "${GREEN}✓ No BIP39 seed phrases detected${NC}" >&2
   exit 0
 fi
