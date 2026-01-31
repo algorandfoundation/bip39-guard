@@ -24,7 +24,7 @@ The detector scans `git diff --cached` (staged changes) for sequences of consecu
 Detection works in two passes:
 
 1. **Single-line** — finds sequences of BIP39 words within each line
-2. **Cross-line** — accumulates words across consecutive lines where every token is a BIP39 word, catching one-per-line and grid formats
+2. **Cross-line** — accumulates words across consecutive lines where every token is a BIP39 word, catching one-per-line and grid formats. Blank or whitespace-only lines are transparent and do not break a sequence
 
 This catches standard 12/24-word BIP39 mnemonics as well as legacy 25-word Algorand account mnemonics (which use the same wordlist).
 
@@ -40,6 +40,9 @@ This catches standard 12/24-word BIP39 mnemonics as well as legacy 25-word Algor
 | Numbered (multi-line) | `1. force`<br>`2. clay`<br>`3. airport`<br>`...` |
 | Grid layout (Algorand wallet) | `1. force 2. clay 3. airport`<br>`4. shoot 5. fence 6. fine`<br>`...` |
 | Plain one-per-line | `force`<br>`clay`<br>`airport`<br>`...` |
+| Blank-separated blocks | `abandon ability`<br><br>`able about above` |
+| Annotated one-per-line | `Word 1: abandon`<br>`Word 2: ability`<br>`...` |
+| Labeled phrases | `mnemonic: abandon ability able about above` |
 
 ### What gets scanned
 
@@ -53,6 +56,34 @@ This catches standard 12/24-word BIP39 mnemonics as well as legacy 25-word Algor
 - Present in the [BIP39 English wordlist](https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt) (2048 words)
 - Purely alphabetic after stripping surrounding punctuation
 - Free of interior punctuation (hyphens, apostrophes, etc.)
+
+Common seed-labeling words (`word`, `words`, `mnemonic`, `seed`, `phrase`, `key`, `backup`, `recovery`, `secret`, `passphrase`) are treated as transparent — they don't break or contribute to a BIP39 sequence. This catches formats like `Word 1: abandon` without false-flagging documentation that mentions "seed phrase" in prose.
+
+## Full Repository Scan
+
+For CI pipelines or manual auditing, scan all tracked files (not just staged changes):
+
+### TypeScript
+
+```bash
+pnpm exec tsx ts/scan-repo.ts
+```
+
+### Bash
+
+```bash
+bash bash/scan-repo.sh
+```
+
+### Options
+
+| Flag | Description |
+|---|---|
+| `--git` | (Default) Scan git-tracked files |
+| `--dir <path>` | Scan all files in directory recursively |
+| `--include-lockfiles` | Include lockfiles in scan (excluded by default) |
+| `--threshold <n>` | Override detection threshold (default: 5) |
+| `--json` | Output violations as JSON (TypeScript only) |
 
 ## Configuration
 
@@ -95,12 +126,15 @@ The script is idempotent — it won't duplicate hook entries.
 ```
 bash/
   check-bip39-seeds.sh     # Standalone bash detector (zero dependencies)
+  scan-repo.sh             # Full-repo scanner (zero dependencies)
 ts/
   wordlist.ts              # BIP39 English wordlist as a Set
   detect.ts                # Core detection algorithm
   detect.test.ts           # Unit tests (vitest)
-  check-staged.ts          # CLI entry point
+  check-staged.ts          # CLI entry point (pre-commit hook)
   check-staged.test.ts     # Integration tests (vitest)
+  scan-repo.ts             # Full-repo scanner CLI
+  scan-repo.test.ts        # Scanner tests (vitest)
 setup.sh                   # One-command installer
 ```
 
